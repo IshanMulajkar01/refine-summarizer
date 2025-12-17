@@ -1,62 +1,50 @@
 import os
 from pypdf import PdfReader
-from langchain_core.documents import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.prompts import PromptTemplate
-from langchain.chains.summarize import load_summarize_chain
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains.summarize import load_summarize_chain
+from dotenv import load_dotenv
 
-# ---------- PDF utils ----------
-def extract_text_from_pdf(file_like) -> str:
-    """
-    file_like can be a path or a file object (Flask/Streamlit uploader provides file-like).
-    """
-    reader = PdfReader(file_like)
-    text_parts = []
+load_dotenv()
+
+def summarize_pdf(pdf_path):
+    # Read PDF
+    reader = PdfReader(pdf_path)
+    text = ""
     for page in reader.pages:
-        text_parts.append((page.extract_text() or ""))
-    return "\n".join(text_parts).strip()
-
-# ---------- Refine summarizer ----------
-def refine_summarize_text(
-    text: str,
-    model: str = "gemini-2.0-flash-exp",
-    temperature: float = 0.1,
-    chunk_size: int = 1800,
-    chunk_overlap: int = 200,
-) -> str:
-    if not text or not text.strip():
-        return "No text found to summarize."
-
-    # LLM
-    llm = ChatGoogleGenerativeAI(model=model, temperature=temperature)
-
+        text += page.extract_text()
+    
     # Split text
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""]
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=10000,
+        chunk_overlap=1000
     )
-    docs = splitter.split_documents([Document(page_content=text)])
-
-    # Prompts for Refine chain
-    map_prompt = PromptTemplate.from_template(
-        "Write a concise, factual summary of the following text.\n\n{text}\n\nSummary:"
+    chunks = text_splitter.create_documents([text])
+    
+    # Setup LLM
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-pro",
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+        temperature=0.3
     )
-    refine_prompt = PromptTemplate.from_template(
-        "You have an existing draft summary:\n\n{existing_answer}\n\n"
-        "Refine it using the new context below. Add missing key facts, remove duplication, "
-        "and keep it crisp (<= 150 words if possible). If the new context adds nothing, return the existing summary.\n\n"
-        "New context:\n{text}\n\nRefined Summary:"
-    )
-
+    
+    # Create prompt template
+    prompt_template = """
+    Write a concise summary of the following text:
+    {text}
+    CONCISE SUMMARY:
+    """
+    prompt = PromptTemplate(template=prompt_template, input_variables=["text"])
+    
+    # Load chain
     chain = load_summarize_chain(
-        llm=llm,
-        chain_type="refine",
-        question_prompt=map_prompt,
-        refine_prompt=refine_prompt,
-        verbose=False
+        llm,
+        chain_type="map_reduce",
+        map_prompt=prompt,
+        combine_prompt=prompt
     )
-
-    # Use invoke() for newer langchain versions
-    result = chain.invoke({"input_documents": docs})
-    return result["output_text"]
+    
+    # Generate summary
+    summary = chain.run(chunks)
+    return summary
